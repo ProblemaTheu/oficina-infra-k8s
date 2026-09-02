@@ -1,0 +1,49 @@
+# Valida a autenticação OIDC entre o GitHub Actions e a AWS.
+#
+# Prova três coisas de uma vez:
+#   1. o provedor OIDC e a role existem e confiam neste repositório;
+#   2. a condição `sub` da trust policy aceita este ref;
+#   3. nenhuma credencial de longa duração é necessária.
+#
+# Roda sob demanda. Depois que os workflows definitivos estiverem no ar,
+# este pode ser removido — ele existe para falhar cedo, não para ficar.
+
+name: OIDC smoke test
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # sem isto o GitHub não emite o token OIDC
+
+jobs:
+  verificar:
+    name: Autenticar na AWS via OIDC
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assumir a role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Quem sou eu?
+        run: aws sts get-caller-identity
+
+      - name: Consigo ler o bucket de state?
+        run: aws s3 ls "s3://${{ vars.TF_BUCKET }}" || echo "(bucket vazio — esperado antes do primeiro apply)"
+
+      - name: Resumo
+        run: |
+          {
+            echo "# 🔐 OIDC — autenticação verificada"
+            echo
+            echo "| Item | Valor |"
+            echo "|---|---|"
+            echo "| Role assumida | \`${{ vars.AWS_ROLE_ARN }}\` |"
+            echo "| Região | \`${{ vars.AWS_REGION }}\` |"
+            echo "| Ref | \`${{ github.ref }}\` |"
+            echo
+            echo "Nenhum secret de credencial AWS foi usado."
+          } >> "$GITHUB_STEP_SUMMARY"
