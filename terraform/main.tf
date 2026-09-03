@@ -114,7 +114,7 @@ module "eks" {
 
   access_entries = merge(
     {
-      for arn in var.admin_principal_arns : replace(split("/", arn)[1], ".", "-") => {
+      for apelido, arn in var.admin_principal_arns : apelido => {
         principal_arn = arn
         policy_associations = {
           admin = {

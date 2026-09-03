@@ -51,13 +51,23 @@ variable "node_max" {
   default     = 3
 }
 
+# Mapa, e não lista: a chave era derivada do ARN com split("/", arn)[1], e o
+# ARN do usuário raiz não tem barra — quebraria justamente nele.
 variable "admin_principal_arns" {
-  description = "Principals IAM com acesso administrativo ao cluster (uma entrada por pessoa)"
-  type        = list(string)
-  default = [
-    "arn:aws:iam::706215605178:user/admin-cli",
-    "arn:aws:iam::706215605178:role/gha-oficina-infra-k8s",
-  ]
+  description = "Principals IAM com acesso administrativo ao cluster, por apelido"
+  type        = map(string)
+  default = {
+    # As chaves são as mesmas que a derivação antiga produzia, para o state
+    # não recriar entradas que já existem e funcionam.
+    admin-cli             = "arn:aws:iam::706215605178:user/admin-cli"
+    gha-oficina-infra-k8s = "arn:aws:iam::706215605178:role/gha-oficina-infra-k8s"
+
+    # O root opera o console desta conta porque o admin-cli só tem chave de
+    # API, sem senha de console. Numa conta de trabalho isto não estaria aqui:
+    # o certo seria um usuário IAM com login próprio, e o root reservado para
+    # o que só ele faz. Registrado como dívida consciente.
+    root = "arn:aws:iam::706215605178:root"
+  }
 }
 
 variable "cd_role_arn" {
