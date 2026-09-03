@@ -80,11 +80,21 @@ resource "aws_iam_role" "github" {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
         }
-        # Uma branch de feature NÃO consegue aplicar nada na AWS
+        # Uma branch de feature NÃO consegue aplicar nada na AWS.
+        #
+        # ⚠️ O GitHub emite "immutable subject claims": o `sub` traz os IDs
+        # numéricos do dono e do repositório, no formato
+        #   repo:Dono@123/repo@456:ref:refs/heads/main
+        # (foi introduzido justamente para que renomear um repositório não
+        # quebre a trust policy). As duas primeiras entradas cobrem o formato
+        # clássico; as duas últimas, o formato com IDs. Manter ambas evita
+        # depender de qual está ativo na conta.
         StringLike = {
           "token.actions.githubusercontent.com:sub" = [
             "repo:${local.org}/${each.value}:ref:refs/heads/main",
             "repo:${local.org}/${each.value}:environment:prod",
+            "repo:${local.org}@*/${each.value}@*:ref:refs/heads/main",
+            "repo:${local.org}@*/${each.value}@*:environment:prod",
           ]
         }
       }
