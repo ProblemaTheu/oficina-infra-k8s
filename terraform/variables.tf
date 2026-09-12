@@ -75,3 +75,9 @@ variable "cd_role_arn" {
   type        = string
   default     = "arn:aws:iam::706215605178:role/gha-oficina-app"
 }
+
+variable "plan_role_arn" {
+  description = "Role read-only usada pelo `terraform plan` em Pull Request deste repositório — só View no cluster"
+  type        = string
+  default     = "arn:aws:iam::706215605178:role/gha-oficina-infra-k8s-plan"
+}

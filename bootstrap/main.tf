@@ -26,6 +26,9 @@ data "aws_caller_identity" "atual" {}
 locals {
   org   = "ProblemaTheu"
   repos = ["oficina-app", "oficina-lambda-auth", "oficina-infra-k8s", "oficina-infra-db"]
+
+  # Repos que rodam Terraform e, portanto, precisam de `plan` em PR.
+  repos_terraform = ["oficina-lambda-auth", "oficina-infra-k8s", "oficina-infra-db"]
 }
 
 # ── State remoto ──────────────────────────────────────────────────────────────
@@ -128,9 +131,73 @@ resource "aws_iam_role_policy" "app" {
   })
 }
 
+# ── Roles de PLAN: o que um Pull Request pode fazer ───────────────────────────
+#
+# A role acima só aceita `main` e `environment:prod`, então um PR não consegue
+# assumi-la — e é assim que deve ser: um PR malicioso não pode aplicar nada.
+# Mas o `terraform plan` comentado no PR precisa ler a AWS. Esta segunda role
+# aceita SOMENTE o `sub` de pull_request e SOMENTE lê.
+#
+# O que ela não protege: o state guarda segredos (senha do RDS, por exemplo),
+# e quem lê o state lê o segredo. Isso vale para qualquer desenho de plan em
+# PR. O que ela protege é o que importa: nada é criado, alterado ou destruído
+# a partir de um PR.
+resource "aws_iam_role" "plan" {
+  for_each = toset(local.repos_terraform)
+  name     = "gha-${each.value}-plan"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = aws_iam_openid_connect_provider.github.arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        # Mesmos dois formatos de `sub` da role principal (ver comentário lá).
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = [
+            "repo:${local.org}/${each.value}:pull_request",
+            "repo:${local.org}@*/${each.value}@*:pull_request",
+          ]
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "plan_readonly" {
+  for_each   = aws_iam_role.plan
+  role       = each.value.name
+  policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
+}
+
+# ReadOnlyAccess exclui `secretsmanager:GetSecretValue` de propósito. O plan
+# precisa dele porque `aws_secretsmanager_secret_version` (infra-db) e o data
+# source homônimo (lambda-auth) leem o valor no refresh. Restrito ao prefixo
+# do projeto — e, como dito acima, o valor já está no state que a role lê.
+resource "aws_iam_role_policy" "plan_secrets" {
+  for_each = aws_iam_role.plan
+  name     = "ler-segredos-do-projeto"
+  role     = each.value.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = "arn:aws:secretsmanager:us-east-1:${data.aws_caller_identity.atual.account_id}:secret:oficina/*"
+    }]
+  })
+}
+
 # ── Saídas usadas por todos os outros repositórios ────────────────────────────
 output "bucket_state" { value = aws_s3_bucket.tfstate.bucket }
 output "account_id" { value = data.aws_caller_identity.atual.account_id }
 output "roles" {
   value = { for k, r in aws_iam_role.github : k => r.arn }
+}
+output "roles_plan" {
+  value = { for k, r in aws_iam_role.plan : k => r.arn }
 }

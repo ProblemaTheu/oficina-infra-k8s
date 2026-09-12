@@ -135,6 +135,19 @@ module "eks" {
           }
         }
       }
+
+      # O `terraform plan` em PR deste repositório roda com uma role só de
+      # leitura (ver bootstrap). O provider kubernetes precisa ler o namespace
+      # no refresh, então ela entra aqui apenas com View.
+      plan = {
+        principal_arn = var.plan_role_arn
+        policy_associations = {
+          view = {
+            policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy"
+            access_scope = { type = "cluster" }
+          }
+        }
+      }
     }
   )
 }

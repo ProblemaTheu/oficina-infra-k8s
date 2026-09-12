@@ -1,0 +1,233 @@
+# Terraform em CI — `plan` no Pull Request, `apply` no merge em `main`.
+#
+# Duas roles OIDC, de propósito (ver bootstrap/main.tf):
+#   - AWS_PLAN_ROLE_ARN  só lê. É a única que um PR consegue assumir, então um
+#                        PR malicioso pode no máximo mostrar um plan.
+#   - AWS_ROLE_ARN       aplica. Só aceita `main` ou `environment: prod`.
+#
+# O `environment: prod` no job de apply existe por dois motivos: é o que a
+# trust policy exige, e é onde a proteção de deploy (reviewer obrigatório)
+# será ligada quando houver permissão de admin no repositório.
+#
+# Ambiente único (corte 10 do plano): não há `homolog` na AWS, então um push
+# em `homolog` NÃO aplica nada — a branch é só integração, com CI completo.
+#
+# ⚠️ A versão do Terraform vem de `.terraform-version` na raiz e PRECISA ser a
+# mesma da máquina que já aplicou: uma versão mais antiga se recusa a ler o
+# state escrito por uma mais nova.
+
+name: Terraform
+
+on:
+  pull_request:
+    branches: [homolog, main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Dois applies ao mesmo tempo disputariam o lock do state.
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: '0'
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Segredo commitado é o vazamento mais barato de evitar (corte 8)
+  # ─────────────────────────────────────────────
+  segredos:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # o gitleaks olha os commits, não só a árvore
+
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─────────────────────────────────────────────
+  # Pull Request: fmt + validate + plan comentado. Nunca aplica.
+  # ─────────────────────────────────────────────
+  plan:
+    name: Plan (pull request)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC
+      pull-requests: write # para comentar o plan
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Versão do Terraform
+        id: tfv
+        working-directory: .
+        run: echo "versao=$(cat .terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ steps.tfv.outputs.versao }}
+          terraform_wrapper: false
+
+      - name: Credenciais AWS (role read-only)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Format
+        run: terraform fmt -check -recursive -diff
+
+      - name: Init
+        run: terraform init
+
+      - name: Validate
+        run: terraform validate
+
+      # -lock=false: a role read-only não pode escrever o arquivo de lock no
+      # S3 — e um plan não precisa de lock. -detailed-exitcode: 0 sem
+      # mudanças, 2 com mudanças, 1 erro.
+      - name: Plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -no-color -lock=false -detailed-exitcode 2>&1 | tee plan.txt
+          codigo=${PIPESTATUS[0]}
+          set -e
+          echo "codigo=$codigo" >> "$GITHUB_OUTPUT"
+          [ "$codigo" -ne 1 ]
+
+      - name: Comentar o plan no PR
+        if: always() && steps.plan.outcome != 'skipped'
+        uses: actions/github-script@v9
+        env:
+          CODIGO: ${{ steps.plan.outputs.codigo }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marcador = '<!-- terraform-plan -->';
+            const codigo = process.env.CODIGO;
+            const titulo = codigo === '0' ? '✅ Terraform plan — sem mudanças'
+                         : codigo === '2' ? '📋 Terraform plan — há mudanças'
+                         : '❌ Terraform plan — falhou';
+
+            let plan = '(sem saída)';
+            try { plan = fs.readFileSync('terraform/plan.txt', 'utf8'); } catch {}
+            // Limite de um comentário no GitHub: 65536 caracteres. O fim do
+            // plan (o resumo) é a parte que importa.
+            if (plan.length > 60000) plan = '…\n' + plan.slice(-60000);
+
+            const body = `${marcador}\n### ${titulo}\n` +
+              `<sub>commit \`${context.sha.slice(0, 7)}\` · workflow \`${context.workflow}\`</sub>\n\n` +
+              `<details><summary>ver plan</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n</details>`;
+
+            // Um comentário por PR, atualizado a cada push — não uma pilha.
+            const { data: comentarios } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number, per_page: 100,
+            });
+            const existente = comentarios.find(c => c.body && c.body.startsWith(marcador));
+            if (existente) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existente.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+
+      - name: Job Summary
+        if: always()
+        run: |
+          {
+            echo "# 📋 Terraform plan"
+            echo
+            echo "Ação: \`plan\` (pull request — nunca aplica)"
+            echo
+            echo '```'
+            tail -n 40 plan.txt 2>/dev/null || echo "(sem plan)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ─────────────────────────────────────────────
+  # main (ou disparo manual): plan + apply do MESMO plan, no mesmo job.
+  # ─────────────────────────────────────────────
+  apply:
+    name: Apply (produção)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Versão do Terraform
+        id: tfv
+        working-directory: .
+        run: echo "versao=$(cat .terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ steps.tfv.outputs.versao }}
+          terraform_wrapper: false
+
+      - name: Credenciais AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Format
+        run: terraform fmt -check -recursive -diff
+
+      - name: Init
+        run: terraform init
+
+      - name: Validate
+        run: terraform validate
+
+      # O apply consome o arquivo de plan: aplica exatamente o que foi
+      # planejado, mesmo que a AWS tenha mudado nesse meio tempo.
+      - name: Plan
+        run: terraform plan -no-color -out=tfplan 2>&1 | tee plan.txt
+
+      - name: Apply
+        run: terraform apply -no-color tfplan 2>&1 | tee apply.txt
+
+      - name: Job Summary
+        if: always()
+        run: |
+          {
+            echo "# 🏗️ Terraform — produção"
+            echo
+            echo "Ação: \`apply\` · ref \`${{ github.ref_name }}\` · commit \`${GITHUB_SHA::7}\`"
+            echo
+            echo "## Plan"
+            echo '```'
+            tail -n 40 plan.txt 2>/dev/null || echo "(sem plan)"
+            echo '```'
+            echo
+            echo "## Apply"
+            echo '```'
+            tail -n 20 apply.txt 2>/dev/null || echo "(não chegou ao apply)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
