@@ -83,6 +83,12 @@ module "eks" {
   # mas o cluster foi criado com a criptografia ligada e a AWS não permite
   # desligá-la depois. Recriar custaria ~25 min por US$ 0,23. Fica como está;
   # o destroy.sh lembra de conferir a chave pendente no fim.
+  #
+  # Sem esta lista, o módulo grava como administrador da chave QUEM RODOU o
+  # Terraform — e a policy mudaria a cada execução (admin-cli local, role de
+  # plan no PR, role de apply no CI). Os mesmos principals que administram o
+  # cluster administram a chave; o root já tem kms:* pelo statement padrão.
+  kms_key_administrators = [for arn in values(var.admin_principal_arns) : arn if !endswith(arn, ":root")]
 
   addons = {
     coredns                = {}
