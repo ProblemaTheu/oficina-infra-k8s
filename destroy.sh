@@ -41,7 +41,7 @@ aws rds describe-db-instances --region "$REGIAO" --query 'DBInstances[].DBInstan
 # encurtar a janela.
 echo "==> Chaves KMS aguardando exclusão (cobram ate sumirem):"
 aws kms list-keys --region "$REGIAO" --query 'Keys[].KeyId' --output text | tr '\t' '\n' | while read -r k; do
-  [ -z "$k" ] && continue
+  [[ -z "$k" ]] && continue
   estado=$(aws kms describe-key --key-id "$k" --region "$REGIAO" --query 'KeyMetadata.KeyState' --output text 2>/dev/null)
-  [ "$estado" = "PendingDeletion" ] && echo "  $k"
+  [[ "$estado" == "PendingDeletion" ]] && echo "  $k"
 done
