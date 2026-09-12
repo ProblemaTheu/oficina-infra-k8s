@@ -73,7 +73,18 @@ Consome `/oficina/{env}/apigw/authorizer_id`, publicado pelo `oficina-lambda-aut
 
 ## Deploy
 
-PR para `main` roda `fmt`, `validate`, `tfsec` e comenta o `plan`. Merge na `main` aplica, com aprovação obrigatória no *environment* `prod`.
+`.github/workflows/terraform.yml`:
+
+| Evento | Role OIDC | O que faz |
+|---|---|---|
+| PR para `homolog` ou `main` | `gha-oficina-infra-k8s-plan` (só leitura) | `fmt`, `validate`, `plan` comentado no PR — **nunca aplica** |
+| push na `main` / disparo manual | `gha-oficina-infra-k8s` | `plan` + `apply` do mesmo plan, no *environment* `prod` |
+
+Duas roles de propósito: a de PR não consegue criar, alterar nem destruir nada, então um PR malicioso mostra no máximo um plan. A trust policy da role de apply só aceita `main` ou `environment:prod` (ver `bootstrap/main.tf`).
+
+O *environment* `prod` é onde a aprovação obrigatória será ligada — depende de permissão de admin no repositório, ainda pendente. `gitleaks` roda em todo evento. Sem `tfsec`/`checkov` (corte 15 do plano).
+
+A versão do Terraform do CI vem de `.terraform-version` e **precisa ser a mesma da máquina que aplicou por último**: uma versão mais antiga se recusa a ler o state.
 
 ## Dockerfile
 
