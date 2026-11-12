@@ -24,8 +24,17 @@ provider "aws" {
 data "aws_caller_identity" "atual" {}
 
 locals {
-  org   = "ProblemaTheu"
-  repos = ["oficina-app", "oficina-lambda-auth", "oficina-infra-k8s", "oficina-infra-db"]
+  org = "ProblemaTheu"
+  repos = [
+    "oficina-app", "oficina-lambda-auth", "oficina-infra-k8s", "oficina-infra-db",
+    # Fase 4 — microsserviços
+    "oficina-billing", "oficina-execution",
+  ]
+
+  # Repos de serviço: o CD só acha o cluster e lê a SSM (mesma policy da Fase 3).
+  # O Terraform do `infra/` de cada serviço é aplicado localmente nesta fase
+  # (corte 15 do plano da Fase 4), por isso eles NÃO entram em repos_terraform.
+  repos_servico = ["oficina-app", "oficina-billing", "oficina-execution"]
 
   # Repos que rodam Terraform e, portanto, precisam de `plan` em PR.
   repos_terraform = ["oficina-lambda-auth", "oficina-infra-k8s", "oficina-infra-db"]
@@ -113,10 +122,13 @@ resource "aws_iam_role_policy_attachment" "infra_admin" {
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 
-# Repo da aplicação: só precisa achar o cluster e ler parâmetros — nada mais.
+# Repos de serviço: só precisam achar o cluster e ler parâmetros — nada mais.
+# O acesso ao Kubernetes vem da access entry de cada role no oficina-infra-k8s
+# (Edit restrito ao namespace do serviço).
 resource "aws_iam_role_policy" "app" {
-  name = "deploy-eks"
-  role = aws_iam_role.github["oficina-app"].id
+  for_each = toset(local.repos_servico)
+  name     = "deploy-eks"
+  role     = aws_iam_role.github[each.value].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -129,6 +141,13 @@ resource "aws_iam_role_policy" "app" {
       Resource = "arn:aws:ssm:us-east-1:${data.aws_caller_identity.atual.account_id}:parameter/oficina/*"
     }]
   })
+}
+
+# A policy era um recurso único na Fase 3; sem isto o for_each a destruiria e
+# recriaria (com uma janela em que o CD do oficina-app fica sem permissão).
+moved {
+  from = aws_iam_role_policy.app
+  to   = aws_iam_role_policy.app["oficina-app"]
 }
 
 # ── Roles de PLAN: o que um Pull Request pode fazer ───────────────────────────
