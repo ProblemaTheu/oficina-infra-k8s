@@ -8,7 +8,7 @@ terraform {
 
   # Lock nativo do backend S3 (Terraform >= 1.10) — sem tabela DynamoDB.
   backend "s3" {
-    bucket       = "oficina-tfstate-706215605178"
+    bucket       = "oficina-tfstate-584481982243"
     key          = "infra-k8s/terraform.tfstate"
     region       = "us-east-1"
     encrypt      = true
