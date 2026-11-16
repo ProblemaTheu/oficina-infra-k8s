@@ -5,10 +5,16 @@ data "aws_availability_zones" "disponiveis" {
   state = "available"
 }
 
+data "aws_caller_identity" "atual" {}
+
 locals {
   azs     = slice(data.aws_availability_zones.disponiveis.names, 0, 2)
   cluster = var.projeto
   ns      = "${var.projeto}-${var.ambiente}"
+
+  # ARNs montados a partir da conta corrente: nenhum ID de conta no código.
+  iam                  = "arn:aws:iam::${data.aws_caller_identity.atual.account_id}"
+  admin_principal_arns = { for apelido, caminho in var.admin_principals : apelido => "${local.iam}:${caminho}" }
 }
 
 # ── Rede ──────────────────────────────────────────────────────────────────────
@@ -88,7 +94,7 @@ module "eks" {
   # Terraform — e a policy mudaria a cada execução (admin-cli local, role de
   # plan no PR, role de apply no CI). Os mesmos principals que administram o
   # cluster administram a chave; o root já tem kms:* pelo statement padrão.
-  kms_key_administrators = [for arn in values(var.admin_principal_arns) : arn if !endswith(arn, ":root")]
+  kms_key_administrators = values(local.admin_principal_arns)
 
   addons = {
     coredns                = {}
@@ -120,7 +126,7 @@ module "eks" {
 
   access_entries = merge(
     {
-      for apelido, arn in var.admin_principal_arns : apelido => {
+      for apelido, arn in local.admin_principal_arns : apelido => {
         principal_arn = arn
         policy_associations = {
           admin = {
@@ -133,7 +139,7 @@ module "eks" {
     {
       # O CD só implanta. Um pipeline comprometido não apaga o cluster.
       cd = {
-        principal_arn = var.cd_role_arn
+        principal_arn = "${local.iam}:role/${var.cd_role}"
         policy_associations = {
           edit = {
             policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
@@ -141,12 +147,25 @@ module "eks" {
           }
         }
       }
-
+    },
+    # Fase 4: o CD de cada microsserviço só implanta no próprio namespace.
+    {
+      for nome, svc in var.servicos : "cd_${nome}" => {
+        principal_arn = "${local.iam}:role/${svc.cd_role}"
+        policy_associations = {
+          edit = {
+            policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
+            access_scope = { type = "namespace", namespaces = [svc.namespace] }
+          }
+        }
+      }
+    },
+    {
       # O `terraform plan` em PR deste repositório roda com uma role só de
       # leitura (ver bootstrap). O provider kubernetes precisa ler o namespace
       # no refresh, então ela entra aqui apenas com View.
       plan = {
-        principal_arn = var.plan_role_arn
+        principal_arn = "${local.iam}:role/${var.plan_role}"
         policy_associations = {
           view = {
             policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy"
@@ -166,5 +185,17 @@ resource "kubernetes_namespace" "app" {
   metadata {
     name   = local.ns
     labels = { ambiente = var.ambiente }
+  }
+}
+
+# Namespaces dos microsserviços da Fase 4. Ficam AQUI, e não no k8s/base de
+# cada serviço, porque Namespace é recurso de escopo de cluster e a role de CD
+# do serviço só tem Edit dentro do próprio namespace — o primeiro deploy
+# falharia tentando criá-lo.
+resource "kubernetes_namespace" "servicos" {
+  for_each = var.servicos
+  metadata {
+    name   = each.value.namespace
+    labels = { ambiente = var.ambiente, servico = each.key }
   }
 }

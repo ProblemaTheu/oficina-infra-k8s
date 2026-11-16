@@ -40,44 +40,62 @@ variable "node_instance_type" {
 }
 
 variable "node_min" {
-  description = "Mínimo de nós"
-  type        = number
-  default     = 2
-}
-
-variable "node_max" {
-  description = "Teto do node group. Sem Cluster Autoscaler (corte 3) fica sempre em 2; o 3º slot só existe para o EKS conseguir substituir um nó numa atualização"
+  description = "Mínimo de nós. 3 na Fase 4: OS + Billing + Execution + nri-bundle não cabem nos 11 pods/nó do t3.small (limite de ENI do VPC CNI)"
   type        = number
   default     = 3
 }
 
-# Mapa, e não lista: a chave era derivada do ARN com split("/", arn)[1], e o
-# ARN do usuário raiz não tem barra — quebraria justamente nele.
-variable "admin_principal_arns" {
-  description = "Principals IAM com acesso administrativo ao cluster, por apelido"
+variable "node_max" {
+  description = "Teto do node group. Sem Cluster Autoscaler (corte 3) fica sempre em node_min; o slot extra só existe para o EKS conseguir substituir um nó numa atualização"
+  type        = number
+  default     = 4
+}
+
+# Principals por apelido → caminho do ARN dentro da conta. O ID da conta vem
+# de aws_caller_identity (main.tf): trocar de conta não muda código.
+# Mapa, e não lista: as chaves viram as chaves das access entries no state.
+variable "admin_principals" {
+  description = "Principals IAM com acesso administrativo ao cluster: apelido → caminho do ARN (user/..., role/...)"
   type        = map(string)
   default = {
-    # As chaves são as mesmas que a derivação antiga produzia, para o state
-    # não recriar entradas que já existem e funcionam.
-    admin-cli             = "arn:aws:iam::706215605178:user/admin-cli"
-    gha-oficina-infra-k8s = "arn:aws:iam::706215605178:role/gha-oficina-infra-k8s"
+    admin-cli             = "user/admin-cli"
+    gha-oficina-infra-k8s = "role/gha-oficina-infra-k8s"
 
-    # O root opera o console desta conta porque o admin-cli só tem chave de
-    # API, sem senha de console. Numa conta de trabalho isto não estaria aqui:
-    # o certo seria um usuário IAM com login próprio, e o root reservado para
-    # o que só ele faz. Registrado como dívida consciente.
-    root = "arn:aws:iam::706215605178:root"
+    # Login do console na conta da organização (Builder ID / acesso gerenciado
+    # da AWS). Na conta da Fase 3 era o root; nesta, o root não tem login.
+    console = "role/managed/AccountFullAccessRole"
   }
 }
 
-variable "cd_role_arn" {
+variable "cd_role" {
   description = "Role do CD da aplicação — acesso Edit restrito ao namespace, nunca ClusterAdmin"
   type        = string
-  default     = "arn:aws:iam::706215605178:role/gha-oficina-app"
+  default     = "gha-oficina-app"
 }
 
-variable "plan_role_arn" {
+# Fase 4: cada microsserviço novo tem namespace próprio e uma role de CD (do
+# bootstrap) com Edit só nele. O OS Service continua no namespace da Fase 3
+# (local.ns), via cd_role.
+variable "servicos" {
+  description = "Microsserviços da Fase 4: namespace e nome da role de CD de cada um"
+  type = map(object({
+    namespace = string
+    cd_role   = string
+  }))
+  default = {
+    billing = {
+      namespace = "billing-prod"
+      cd_role   = "gha-oficina-billing"
+    }
+    execution = {
+      namespace = "execution-prod"
+      cd_role   = "gha-oficina-execution"
+    }
+  }
+}
+
+variable "plan_role" {
   description = "Role read-only usada pelo `terraform plan` em Pull Request deste repositório — só View no cluster"
   type        = string
-  default     = "arn:aws:iam::706215605178:role/gha-oficina-infra-k8s-plan"
+  default     = "gha-oficina-infra-k8s-plan"
 }
